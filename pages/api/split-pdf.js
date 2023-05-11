@@ -1,49 +1,96 @@
-export default (req, res) => {
-  // Open Chrome DevTools to step through the debugger!
-  // debugger;
-  res.status(200).json({ name: 'Hello, world!' });
-};
+// export default (req, res) => {
+//   // Open Chrome DevTools to step through the debugger!
+//   // debugger;
+//   authorize().then(listFiles).catch(console.error);
+// };
 
-const { PDFDocument } = require('pdfplumber');
+const fs = require('fs').promises;
+const path = require('path');
+const process = require('process');
+const { authenticate } = require('@google-cloud/local-auth');
 const { google } = require('googleapis');
 
-const drive = google.drive({
-  version: 'v3',
-  auth: new google.auth.OAuth2(),
-});
+// If modifying these scopes, delete token.json.
+const SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly'];
+// The file token.json stores the user's access and refresh tokens, and is
+// created automatically when the authorization flow completes for the first
+// time.
+const TOKEN_PATH = path.join(process.cwd(), 'token.json');
+const CREDENTIALS_PATH = path.join(process.cwd(), 'credentials.json');
 
-async function splitPdf(fileId, text) {
-  // Load the PDF file from Google Drive.
-  const request = {
-    method: 'GET',
-    path: `files/${fileId}`,
-  };
-
-  const response = await drive.files.request(request);
-
-  const pdfContent = response.data.content;
-
-  // Create a PDFDocument object from the PDF content.
-  const pdfDocument = new PDFDocument();
-  pdfDocument.load(pdfContent);
-
-  // Get the list of pages in the PDF file.
-  const pages = pdfDocument.getNumberOfPages();
-
-  // Create a list of pages that contain the specified text.
-  const pagesWithText = [];
-  for (let i = 0; i < pages; i++) {
-    const pageText = pdfDocument.getPage(i).extract_text();
-    if (text in pageText) {
-      pagesWithText.push(i);
-    }
-  }
-
-  // Split the PDF file at the pages that contain the specified text.
-  for (const pageNumber of pagesWithText) {
-    const splitPdfPath = `${fileId}_split_${pageNumber + 1}.pdf`;
-    const pdfWriter = new PDFDocument();
-    pdfWriter.addPage(pdfDocument.getPage(pageNumber));
-    pdfWriter.save(splitPdfPath);
+/**
+ * Reads previously authorized credentials from the save file.
+ *
+ * @return {Promise<OAuth2Client|null>}
+ */
+async function loadSavedCredentialsIfExist() {
+  try {
+    const content = await fs.readFile(TOKEN_PATH);
+    const credentials = JSON.parse(content);
+    return google.auth.fromJSON(credentials);
+  } catch (err) {
+    return null;
   }
 }
+
+/**
+ * Serializes credentials to a file comptible with GoogleAUth.fromJSON.
+ *
+ * @param {OAuth2Client} client
+ * @return {Promise<void>}
+ */
+async function saveCredentials(client) {
+  const content = await fs.readFile(CREDENTIALS_PATH);
+  const keys = JSON.parse(content);
+  const key = keys.installed || keys.web;
+  const payload = JSON.stringify({
+    type: 'authorized_user',
+    client_id: key.client_id,
+    client_secret: key.client_secret,
+    refresh_token: client.credentials.refresh_token,
+  });
+  await fs.writeFile(TOKEN_PATH, payload);
+}
+
+/**
+ * Load or request or authorization to call APIs.
+ *
+ */
+async function authorize() {
+  let client = await loadSavedCredentialsIfExist();
+  if (client) {
+    return client;
+  }
+  client = await authenticate({
+    scopes: SCOPES,
+    keyfilePath: CREDENTIALS_PATH,
+  });
+  if (client.credentials) {
+    await saveCredentials(client);
+  }
+  return client;
+}
+
+/**
+ * Lists the names and IDs of up to 10 files.
+ * @param {OAuth2Client} authClient An authorized OAuth2 client.
+ */
+async function listFiles(authClient) {
+  const drive = google.drive({ version: 'v3', auth: authClient });
+  const res = await drive.files.list({
+    pageSize: 10,
+    fields: 'nextPageToken, files(id, name)',
+  });
+  const files = res.data.files;
+  if (files.length === 0) {
+    console.log('No files found.');
+    return;
+  }
+
+  console.log('Files:');
+  files.map((file) => {
+    console.log(`${file.name} (${file.id})`);
+  });
+}
+
+authorize().then(listFiles).catch(console.error);
